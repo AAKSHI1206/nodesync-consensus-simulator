@@ -1,1 +1,24 @@
+# Build directories
+build/
+out/
+cmake-build-*/
 
+# IDE files
+.vscode/
+.idea/
+*.suo
+*.user
+*.sln
+*.vcxproj*
+
+# Compiled objects
+*.o
+*.obj
+*.a
+*.lib
+*.exe
+*.out
+
+# OS files
+.DS_Store
+Thumbs.db
