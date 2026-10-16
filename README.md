@@ -20,64 +20,101 @@ Client Request → Leader → Log Entry → Replication → Majority Acknowledge
 
 If the leader fails, the remaining nodes can start a new election. A new leader is selected when a majority of nodes vote for it, allowing the system to continue when enough nodes are available.
 
-## Main Features
+## Project Status
 
-- Raft leader election and heartbeats
-- Log replication and majority-based commitment
-- Distributed order creation and inventory reservation
-- Simulated node and leader failures
-- Message delay and message loss
-- Network partition simulation
-- Event logging and performance metrics
-- Comparison of different network and failure scenarios
+**Currently under development.** The foundation layers (data structures, storage, nodes, messages and the simulated network) are implemented and tested. Raft consensus is the next stage.
+
+### Completed
+
+| Component | Location | Description |
+|---|---|---|
+| Linked List | `dsa_c/` | Singly linked list in C; backs the Raft log |
+| Queue | `dsa_c/` | FIFO queue in C; used as a message channel |
+| Raft Log Structure | `dsa_c/` | Log entries (index, term, command) with append, lookup, last index/term and truncation |
+| Storage | `cpp/` | C++ wrapper over the C log with safe ownership (move-only) |
+| Node | `cpp/` | Node identity and lifecycle (start / stop / active state) |
+| Message | `cpp/` | Raft message model: sender, receiver, term, type, payload. Types: `REQUEST_VOTE`, `VOTE_RESPONSE`, `APPEND_ENTRIES`, `APPEND_RESPONSE`, `CLIENT_COMMAND` |
+| Network | `cpp/` | Simulated network: node registry, per-node mailboxes, direct send, broadcast, FIFO receive; messages to inactive nodes are dropped. No real sockets or threads |
+| Integration demo | `cpp/src/main.cpp` | Phase 1: storage + queue. Phase 2: 5-node message flow showing a vote request, vote responses and heartbeats (scripted, not yet driven by Raft logic) |
+
+### Roadmap
+
+- [x] Core data structures (linked list, queue, Raft log)
+- [x] Storage abstraction
+- [x] Node, Message and simulated Network
+- [x] Multi-node communication demo
+- [ ] Load balancer for routing client requests to backend servers *(in progress)*
+- [ ] Raft leader election: roles, terms, voting, election timeouts, heartbeats *(in progress)*
+- [ ] Log replication and majority-based commitment
+- [ ] Distributed order creation and inventory reservation
+- [ ] Failure simulation: node/leader failure, message delay and loss, network partitions
+- [ ] Event logging, performance metrics and scenario comparison
 
 ## DSA and C++ Concepts
 
-The project uses DSA and OOP concepts as part of the actual system implementation.
+**Used so far**
 
-- Graphs / adjacency lists for representing the network topology
-- Queues for handling pending messages
+- Linked list (C) for storing Raft log entries
+- Queue (C) for pending messages
+- `std::map` and `std::queue` for the node registry and per-node mailboxes
+- C++ OOP (encapsulation, RAII, move semantics) for Node, Message, Network and Storage
+- Mixed C/C++ build with `extern "C"` linkage
+
+**Planned**
+
+- Graphs / adjacency lists for network topology
 - Priority queues for scheduling delayed messages and events
-- Vectors for logs and dynamic collections
-- Hash maps for fast node, order and inventory lookup
-- BFS/DFS for network connectivity analysis
-- Optional DSU for detecting disconnected network components
-- C++ OOP for modelling Node, Message, Network, RaftEngine, Simulator and other components
+- Hash maps for order and inventory lookup
+- BFS/DFS (or DSU) for detecting disconnected network components during partitions
 
 ## Technology Stack
 
-- C++17
+- C11 and C++17
 - Standard Template Library (STL)
-- Raft Consensus Algorithm
-- CMake
+- CMake (3.16+)
 - Git & GitHub
 - Console-based interface
-- CSV/Text files for logs and experiment results
 
-## System Architecture
+## Repository Structure
 
-The simulator is divided into the following major layers:
+```
+dsa_c/          C data structures (linked list, queue, Raft log)
+cpp/include/    C++ headers (Node, Message, Network, Storage, ...)
+cpp/src/        C++ sources and main.cpp demo
+cpp/tests/      Automated tests for the C++ components
+tests/          Interactive CLI testers for the C data structures and Storage
+docs/           Phase 1 report and documentation
+config/         Simulation configuration (placeholder)
+simulation/     Failure and network scenarios (placeholder)
+```
 
-1. **E-Commerce Layer**  
-   Handles orders and inventory operations.
+## Build and Run
 
-2. **Raft Consensus Layer**  
-   Handles leader election, heartbeats, log replication and commitment.
+```bash
+cmake -S . -B build
+cmake --build build
+cd build && ctest --output-on-failure
+```
 
-3. **Network Simulation Layer**  
-   Models node connections, message delivery, delays, message loss and partitions.
+On Windows with MinGW, add `-G "MinGW Makefiles"` to the first command.
 
-4. **Failure & Monitoring Layer**  
-   Injects failures and records system behaviour and performance metrics.
+> **Note:** `CMakeLists.txt` already lists the upcoming Server, LoadBalancer and load-balancer test files. Until those files are pushed, a fresh clone will not configure.
+
+## Tests
+
+**Automated (run by CTest):**
+
+| Test | Checks |
+|---|---|
+| `test_node` | Node ID, initial state, start/stop lifecycle |
+| `test_message` | Message fields, all message types, type-to-string conversion |
+| `test_network` | Registration, direct delivery, broadcast, FIFO order, error and inactive-node cases |
+| `test_communication` | End-to-end multi-node send, broadcast and receive |
+
+**Interactive (menu-driven CLI):** `test_queue`, `test_linked_list`, `test_log_structure` and `test_storage` let you exercise each data structure by hand.
 
 ## Expected Outcome
 
 The final system will provide a working simulation of a distributed e-commerce backend and demonstrate how Raft maintains a consistent replicated state under different failure and network conditions.
 
 The project will also demonstrate the practical use of C++ OOP, STL, Data Structures and Algorithms in a real-world distributed-systems scenario.
-
-## Project Status
-
- **Currently under development**
-
-The implementation will be developed incrementally, beginning with the virtual node and network structure, followed by message handling, Raft consensus, e-commerce operations, failure simulation, logging, metrics and visualization.
