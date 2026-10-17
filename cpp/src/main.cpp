@@ -1,7 +1,7 @@
 /*
  * main.cpp
  * ========
- * NodeSync GÇö Entry point and integration demo.
+ * NodeSync â€” Entry point and integration demo.
  *
  * Phase 1: Demonstrates Linked List, Queue, Log Structure, Storage.
  * Phase 2: Demonstrates Node + Message + Network multi-node communication.
@@ -18,6 +18,7 @@
 #include "Network.h"
 #include "Server.h"
 #include "LoadBalancer.h"
+#include "RaftCluster.h"
 
 extern "C" {
 #include "queue.h"
@@ -25,10 +26,10 @@ extern "C" {
 
 int main() {
   std::cout << "========================================\n";
-  std::cout << "  NodeSync GÇö Phase 1 Integration Demo\n";
+  std::cout << "  NodeSync â€” Phase 1 Integration Demo\n";
   std::cout << "========================================\n\n";
 
-  /* GöÇGöÇ 1. Storage (C++ wrapper over C Log + Linked List) GöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇ */
+  /* â”€â”€ 1. Storage (C++ wrapper over C Log + Linked List) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 
   std::cout << "[Storage] Creating storage...\n";
   Storage storage;
@@ -51,7 +52,7 @@ int main() {
     }
   }
 
-  /* GöÇGöÇ 2. Queue (simulated message channel) GöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇ */
+  /* â”€â”€ 2. Queue (simulated message channel) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 
   std::cout << "\n[Queue] Creating message queue...\n";
   Queue *msgQueue = queue_create();
@@ -95,7 +96,7 @@ int main() {
     }
   }
 
-  /* GöÇGöÇ 3. Truncation demo GöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇ */
+  /* â”€â”€ 3. Truncation demo â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 
   std::cout << "\n[Storage] Truncating from index 4...\n";
   int removed = storage.truncateFrom(4);
@@ -112,103 +113,71 @@ int main() {
   std::cout << "========================================\n";
 
   /* ================================================================
-   * Phase 2 GÇö Multi-Node Communication Demo
+   * Phase 2 â€” Raft Leader Election Demo (real consensus)
    * ================================================================ */
 
   std::cout << "\n\n========================================\n";
-  std::cout << "  NodeSync GÇö Phase 2 Network Demo\n";
+  std::cout << "  NodeSync â€” Phase 2 Raft Election Demo\n";
   std::cout << "========================================\n\n";
 
-  // Create a 5-node cluster
-  Node n1(1), n2(2), n3(3), n4(4), n5(5);
+  {
+    // Create a 5-node cluster with deterministic election timeouts
+    RaftCluster cluster(5, 50, 20, 10);
+    cluster.startAll();
 
-  // Start all nodes
-  n1.start();
-  n2.start();
-  n3.start();
-  n4.start();
-  n5.start();
+    std::cout << "[Cluster] Created and started 5 nodes.\n";
+    std::cout << "[Cluster] Running Raft election simulation...\n\n";
 
-  std::cout << "[Nodes] Created and started 5 nodes.\n";
+    // Run the simulation for enough ticks to elect a leader
+    cluster.runFor(500);
 
-  // Create the network
-  Network net;
-  net.registerNode(&n1);
-  net.registerNode(&n2);
-  net.registerNode(&n3);
-  net.registerNode(&n4);
-  net.registerNode(&n5);
+    // Display results
+    cluster.printState();
 
-  std::cout << "[Network] Registered " << net.getNodeCount() << " nodes.\n\n";
+    int leader = cluster.findLeader();
+    if (leader != -1) {
+      std::cout << "\n[RESULT] Leader elected: Node " << leader
+                << " (term " << cluster.getEngine(leader)->getCurrentTerm()
+                << ", votes: " << cluster.getEngine(leader)->getVoteCount()
+                << ")\n";
+    } else {
+      std::cout << "\n[RESULT] No leader elected yet.\n";
+    }
 
-  // === Election Simulation ===
-  std::cout << "--- Election Phase ---\n\n";
+    // === Leader Failure and Re-Election ===
+    std::cout << "\n--- Leader Failure Simulation ---\n\n";
 
-  // Node 1 requests votes from all others
-  int votes = net.broadcast(1, 1, MessageType::REQUEST_VOTE, "candidate=1");
-  std::cout << "Node 1 -> ALL : REQUEST_VOTE (delivered to "
-            << votes << " nodes)\n";
+    if (leader != -1) {
+      std::cout << "[Cluster] Stopping leader Node " << leader << "...\n";
+      cluster.stopNode(leader);
 
-  // Nodes 2, 3, 4 grant votes back to Node 1
-  net.sendMessage(Message(2, 1, 1, MessageType::VOTE_RESPONSE, "granted=true"));
-  std::cout << "Node 2 -> Node 1 : VOTE_RESPONSE (granted)\n";
+      // Run more ticks to allow re-election
+      cluster.runFor(500);
 
-  net.sendMessage(Message(3, 1, 1, MessageType::VOTE_RESPONSE, "granted=true"));
-  std::cout << "Node 3 -> Node 1 : VOTE_RESPONSE (granted)\n";
+      cluster.printState();
 
-  net.sendMessage(Message(4, 1, 1, MessageType::VOTE_RESPONSE, "granted=true"));
-  std::cout << "Node 4 -> Node 1 : VOTE_RESPONSE (granted)\n";
-
-  // Node 5 denies vote
-  net.sendMessage(Message(5, 1, 1, MessageType::VOTE_RESPONSE, "granted=false"));
-  std::cout << "Node 5 -> Node 1 : VOTE_RESPONSE (denied)\n";
-
-  // Node 1 receives and counts votes
-  std::cout << "\n[Node 1] Processing vote responses...\n";
-  int grantedVotes = 1;  // self-vote
-  Message recv(0, 0, 0, MessageType::REQUEST_VOTE, "");
-
-  while (net.receiveMessage(1, recv)) {
-    if (recv.getType() == MessageType::VOTE_RESPONSE) {
-      std::cout << "  Received " << messageTypeToString(recv.getType())
-                << " from Node " << recv.getSenderId()
-                << " : " << recv.getPayload() << "\n";
-      if (recv.getPayload() == "granted=true") {
-        grantedVotes++;
+      int newLeader = cluster.findLeader();
+      if (newLeader != -1) {
+        std::cout << "\n[RESULT] New leader elected: Node " << newLeader
+                  << " (term "
+                  << cluster.getEngine(newLeader)->getCurrentTerm()
+                  << ")\n";
+      } else {
+        std::cout << "\n[RESULT] No new leader elected.\n";
       }
     }
   }
-  std::cout << "[Node 1] Total votes: " << grantedVotes << "/5 GÇö "
-            << (grantedVotes > 2 ? "ELECTED LEADER" : "ELECTION FAILED") << "\n";
-
-  // === Heartbeat Simulation ===
-  std::cout << "\n--- Heartbeat Phase ---\n\n";
-
-  int hb = net.broadcast(1, 1, MessageType::APPEND_ENTRIES, "heartbeat");
-  std::cout << "Node 1 -> ALL : APPEND_ENTRIES (heartbeat to "
-            << hb << " nodes)\n";
-
-  // Each follower acknowledges
-  for (int id = 2; id <= 5; id++) {
-    Message hbMsg(0, 0, 0, MessageType::REQUEST_VOTE, "");
-    if (net.receiveMessage(id, hbMsg)) {
-      std::cout << "  Node " << id << " received heartbeat from Node "
-                << hbMsg.getSenderId() << "\n";
-    }
-  }
-
-  std::cout << "\nAll messages delivered successfully.\n";
 
   std::cout << "\n========================================\n";
-  std::cout << "  Phase 2 complete. Network OK.\n";
+  std::cout << "  Phase 2 complete. Raft Election OK.\n";
   std::cout << "========================================\n";
 
   /* ================================================================
-   * Phase 3 GÇö Load Balancer Integration Demo
+   * Phase 3 â€” Load Balancer Integration Demo
    * ================================================================ */
 
   std::cout << "\n\n========================================\n";
-  std::cout << "  NodeSync GÇö Phase 3 Load Balancer Demo\n";
+  std::cout << "  NodeSync â€” Phase 3 Load Balancer Demo\n";
   std::cout << "========================================\n\n";
 
   // Create shared network
@@ -230,13 +199,14 @@ int main() {
 
   std::cout << "[Servers] Created and registered 3 servers.\n";
 
-  // Setup Load Balancer
-  LoadBalancer lb;
+  // Setup Load Balancer with Load-Aware (Least-Loaded) routing policy
+  LoadBalancer lb(RoutingPolicy::LEAST_LOADED);
   lb.registerServer(&s1);
   lb.registerServer(&s2);
   lb.registerServer(&s3);
 
-  std::cout << "[Load Balancer] Registered " << lb.getServerCount() << " servers.\n\n";
+  std::cout << "[Load Balancer] Registered " << lb.getServerCount()
+            << " servers (Policy: Load-Aware / Least-Loaded).\n\n";
   std::cout << "--- Processing Client Requests ---\n\n";
 
   // Using the existing C Queue for client requests

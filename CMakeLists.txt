@@ -20,7 +20,7 @@ add_library(dsa_c STATIC
     dsa_c/src/log_structure.c
 )
 
-# ── C++ core library (Node, Message, Network, Storage) ───────────────
+# ── C++ core library (Node, Message, Network, Storage, Raft) ─────────
 add_library(nodesync_core STATIC
     cpp/src/Node.cpp
     cpp/src/Message.cpp
@@ -28,6 +28,8 @@ add_library(nodesync_core STATIC
     cpp/src/Storage.cpp
     cpp/src/Server.cpp
     cpp/src/LoadBalancer.cpp
+    cpp/src/RaftEngine.cpp
+    cpp/src/RaftCluster.cpp
 )
 target_link_libraries(nodesync_core PUBLIC dsa_c)
 
@@ -104,3 +106,33 @@ add_executable(test_loadbalancer
 )
 target_link_libraries(test_loadbalancer PRIVATE nodesync_core)
 add_test(NAME LoadBalancerTests COMMAND test_loadbalancer)
+
+# ── Feature 3: Raft Leader Election Tests ────────────────────────────
+
+# Raft Engine unit tests
+add_executable(test_raft_engine
+    cpp/tests/test_raft_engine.cpp
+)
+target_link_libraries(test_raft_engine PRIVATE nodesync_core)
+add_test(NAME RaftEngineTests COMMAND test_raft_engine)
+
+# Election integration tests
+add_executable(test_election
+    cpp/tests/test_election.cpp
+)
+target_link_libraries(test_election PRIVATE nodesync_core)
+add_test(NAME ElectionTests COMMAND test_election)
+
+# Storage metadata tests
+add_executable(test_storage_metadata
+    cpp/tests/test_storage_metadata.cpp
+)
+target_link_libraries(test_storage_metadata PRIVATE nodesync_core)
+add_test(NAME StorageMetadataTests COMMAND test_storage_metadata)
+
+# Simulation clock tests
+add_executable(test_simulation
+    cpp/tests/test_simulation.cpp
+)
+target_link_libraries(test_simulation PRIVATE nodesync_core)
+add_test(NAME SimulationTests COMMAND test_simulation)
