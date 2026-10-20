@@ -40,10 +40,10 @@ RaftCluster::RaftCluster(int size,
 
 void RaftCluster::startAll()
 {
-    for (int i = 0; i < clusterSize_; i++) {
-        nodes_[i]->start();
-        network_.registerNode(nodes_[i].get());
-        engines_[i]->start();
+    // Same rules as startNode(): fresh start the first time, recovery
+    // for a stopped node, nothing for one that is already running.
+    for (int id = 1; id <= clusterSize_; id++) {
+        startNode(id);
     }
 }
 
@@ -56,8 +56,24 @@ void RaftCluster::stopNode(int nodeId)
 void RaftCluster::startNode(int nodeId)
 {
     if (nodeId < 1 || nodeId > clusterSize_) return;
+    if (nodes_[nodeId - 1]->isActive()) return;   // already running
     nodes_[nodeId - 1]->start();
-    engines_[nodeId - 1]->start();
+
+    if (!network_.isRegistered(nodeId)) {
+        // Never started before: fresh start.
+        network_.registerNode(nodes_[nodeId - 1].get());
+        engines_[nodeId - 1]->start();
+    } else {
+        // Restart after a crash: persistent Raft state survives.
+        engines_[nodeId - 1]->recover(currentTime_);
+    }
+}
+
+int RaftCluster::submitCommand(const std::string& command)
+{
+    int leader = findLeader();
+    if (leader == -1) return -1;
+    return engines_[leader - 1]->propose(command);
 }
 
 // ── Simulation ─────────────────────────────────────────────────────
@@ -137,6 +153,17 @@ Node* RaftCluster::getNode(int nodeId)
     return nodes_[nodeId - 1].get();
 }
 
+const Storage* RaftCluster::getStorage(int nodeId) const
+{
+    if (nodeId < 1 || nodeId > clusterSize_) return nullptr;
+    return storages_[nodeId - 1].get();
+}
+
+Network* RaftCluster::getNetwork()
+{
+    return &network_;
+}
+
 int RaftCluster::getClusterSize() const
 {
     return clusterSize_;
@@ -155,6 +182,9 @@ void RaftCluster::printState() const
                   << " | VotedFor: " << engines_[i]->getVotedFor()
                   << " | Votes: " << engines_[i]->getVoteCount()
                   << " | Leader: " << engines_[i]->getLeaderId()
+                  << " | Log: " << storages_[i]->getLastLogIndex()
+                  << " | Commit: " << engines_[i]->getCommitIndex()
+                  << " | Applied: " << engines_[i]->getLastApplied()
                   << "\n";
     }
     std::cout << "---\n";

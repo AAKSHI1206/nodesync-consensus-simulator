@@ -35,14 +35,21 @@ public:
 
     // ── Simulation ─────────────────────────────────────────────────
 
-    // Start all nodes and their engines.
+    // Start all nodes and their engines (same rules as startNode).
     void startAll();
 
     // Stop a specific node (simulates crash).
     void stopNode(int nodeId);
 
-    // Start a specific (previously stopped) node.
+    // Start a specific (previously stopped) node.  A node that was
+    // running before recovers with its term, vote and log intact; a
+    // node that is already running is left alone.
     void startNode(int nodeId);
+
+    // Hand a client command to the current leader.  Returns the log
+    // index it was appended at, or -1 if there is no leader.  The
+    // command is committed only once a majority has replicated it.
+    int submitCommand(const std::string& command);
 
     // Run the simulation for the given number of ticks.
     // Each tick: advance time → deliver all pending messages →
@@ -65,6 +72,12 @@ public:
 
     // Get the Node for a specific node (1-indexed).
     Node* getNode(int nodeId);
+
+    // Get the replicated log of a specific node (1-indexed).
+    const Storage* getStorage(int nodeId) const;
+
+    // Shared network (e.g. to inject delayed or duplicate messages).
+    Network* getNetwork();
 
     // Get the cluster size.
     int getClusterSize() const;
