@@ -136,3 +136,33 @@ add_executable(test_simulation
 )
 target_link_libraries(test_simulation PRIVATE nodesync_core)
 add_test(NAME SimulationTests COMMAND test_simulation)
+
+# ── Feature 4: Log Replication and Commitment Tests ──────────────────
+
+# Storage operations and conflict resolution
+add_executable(test_log_storage
+    cpp/tests/test_log_storage.cpp
+)
+target_link_libraries(test_log_storage PRIVATE nodesync_core)
+add_test(NAME LogStorageTests COMMAND test_log_storage)
+
+# AppendEntries protocol, progress tracking and commitment
+add_executable(test_append_entries
+    cpp/tests/test_append_entries.cpp
+)
+target_link_libraries(test_append_entries PRIVATE nodesync_core)
+add_test(NAME AppendEntriesTests COMMAND test_append_entries)
+
+# Stale, duplicate and queued replication messages
+add_executable(test_replication_messages
+    cpp/tests/test_replication_messages.cpp
+)
+target_link_libraries(test_replication_messages PRIVATE nodesync_core)
+add_test(NAME ReplicationMessageTests COMMAND test_replication_messages)
+
+# Cluster-level replication scenarios
+add_executable(test_log_replication
+    cpp/tests/test_log_replication.cpp
+)
+target_link_libraries(test_log_replication PRIVATE nodesync_core)
+add_test(NAME LogReplicationTests COMMAND test_log_replication)
