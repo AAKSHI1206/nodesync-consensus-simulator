@@ -3,6 +3,8 @@
 
 #include "Network.h"
 #include "Storage.h"
+#include <functional>
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
@@ -10,12 +12,25 @@
 /*
  * RaftEngine.h
  * ============
- * Core Raft leader election engine.
+ * Core Raft engine: leader election and log replication.
  *
  * Each node in the cluster owns one independent RaftEngine that
  * manages its role, term, voting state, election timeouts, and
  * leader heartbeats.  Uses deterministic simulated time (tick-based)
  * rather than wall-clock delays.
+ *
+ * Log replication (Feature 4):
+ *   - The leader appends client commands to its Storage and sends
+ *     APPEND_ENTRIES (prevLogIndex, prevLogTerm, entries,
+ *     leaderCommit) to every peer.
+ *   - Followers check log matching, resolve conflicts and reply
+ *     with APPEND_RESPONSE.
+ *   - The leader tracks nextIndex / matchIndex per peer and
+ *     advances commitIndex by majority (current-term rule).
+ *   - Committed entries are handed to the apply callback exactly
+ *     once, in log order (commitIndex vs lastApplied).
+ *
+ * Membership: node IDs are 1..clusterSize (as created by RaftCluster).
  *
  * Reuses existing: Node, Message, Network, Storage.
  */
@@ -56,6 +71,12 @@ public:
     // Start the engine (begin as FOLLOWER, arm election timer).
     void start();
 
+    // Restart after a crash.  Keeps the persistent Raft state
+    // (currentTerm, votedFor, the log in Storage) and the applied
+    // progress; resets volatile state and re-arms the election timer
+    // relative to currentTime.
+    void recover(int currentTime);
+
     // ── Simulation clock ───────────────────────────────────────────
 
     // Advance the engine by one tick of simulated time.
@@ -90,12 +111,46 @@ public:
     // Manually initiate an election (normally triggered by timeout).
     void startElection(int currentTime);
 
+    // ── Log replication ────────────────────────────────────────────
+
+    // Leader only: append a client command to the local log and start
+    // replicating it.  Returns the new entry's log index, or -1 if
+    // this node is not the leader (the command is NOT committed yet).
+    int propose(const std::string& command);
+
+    // Called once per committed entry, in index order.  This is the
+    // boundary where the order/inventory state machine plugs in.
+    using ApplyCallback =
+        std::function<void(int index, int term, const std::string& command)>;
+    void setApplyCallback(ApplyCallback callback);
+
+    int getCommitIndex() const;
+    int getLastApplied() const;
+
+    // Leader's replication progress for a peer (-1 if not leader or
+    // unknown peer).
+    int getNextIndex(int peerId)  const;
+    int getMatchIndex(int peerId) const;
+
 private:
     // ── Internal message handlers ──────────────────────────────────
 
     void handleRequestVote(const Message& msg);
     void handleVoteResponse(const Message& msg);
     void handleAppendEntries(const Message& msg);
+    void handleAppendResponse(const Message& msg);
+
+    // ── Replication helpers ────────────────────────────────────────
+
+    void sendAppendEntries(int peerId);
+    void sendAppendResponse(int leaderId, bool success, int matchIndex,
+                            int prevLogIndex, int hintIndex);
+    void advanceCommitIndex();
+    void applyCommittedEntries();
+    std::vector<int> peerIds() const;
+
+    // Term of the entry at index (0 for index 0, -1 if missing).
+    int termAt(int index) const;
 
     // ── Role transitions ───────────────────────────────────────────
 
@@ -121,6 +176,17 @@ private:
     std::set<int> votesReceived_;   // set of node IDs that granted votes
     int           electionTerm_;    // term in which the current election
                                     // was started (to reject stale responses)
+
+    // Replication state
+    int commitIndex_;   // highest log index known to be committed
+    int lastApplied_;   // highest log index handed to applyCallback_
+
+    // Leader only (reinitialised on election)
+    std::map<int, int> nextIndex_;   // peer ID -> next index to send
+    std::map<int, int> matchIndex_;  // peer ID -> highest index known
+                                     //            to match on that peer
+
+    ApplyCallback applyCallback_;
 
     // ── Configuration (fixed for this cluster) ─────────────────────
 
