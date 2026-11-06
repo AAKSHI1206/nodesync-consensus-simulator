@@ -7,6 +7,13 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# MinGW: put the C/C++ runtime inside each .exe, so the programs also run
+# from Git Bash (which otherwise loads its own, older libstdc++-6.dll and
+# the program exits silently with code 127).
+if(MINGW)
+    add_link_options(-static)
+endif()
+
 # ── Include directories ──────────────────────────────────────────────
 include_directories(
     ${CMAKE_SOURCE_DIR}/dsa_c/include
