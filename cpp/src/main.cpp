@@ -7,8 +7,16 @@
  * Phase 2: Demonstrates Node + Message + Network multi-node communication.
  *
  * Updated by: Sanjam (Phase 2 integration)
+ *
+ * Order simulator (PBL review 2/3): main() now opens an interactive
+ * menu over OrderService.  The original demos above are unchanged and
+ * run from menu option 8 (or `nodesync --foundations`).
+ *   nodesync               interactive menu
+ *   nodesync --demo        scripted order demo, then exit
+ *   nodesync --foundations original Phase 1-3 demos, then exit
  */
 
+#include <cctype>
 #include <iostream>
 #include <string>
 
@@ -19,12 +27,14 @@
 #include "Server.h"
 #include "LoadBalancer.h"
 #include "RaftCluster.h"
+#include "OrderService.h"
 
 extern "C" {
 #include "queue.h"
 }
 
-int main() {
+// Original integration demos (body unchanged; was main()).
+static int runFoundationDemos() {
   std::cout << "========================================\n";
   std::cout << "  NodeSync — Phase 1 Integration Demo\n";
   std::cout << "========================================\n\n";
@@ -263,5 +273,175 @@ int main() {
   std::cout << "  Phase 3 complete. Load Balancer OK.\n";
   std::cout << "========================================\n";
 
+  return 0;
+}
+
+/* ================================================================
+ * Interactive order simulator (presentation only: all state lives in
+ * RaftCluster and OrderService)
+ * ================================================================ */
+
+static const int kClusterSize = 3;
+
+static std::string toUpper(std::string text) {
+  for (char& c : text) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+  return text;
+}
+
+// Read one line; false on end of input.
+static bool ask(const std::string& prompt, std::string& answer) {
+  std::cout << prompt;
+  return static_cast<bool>(std::getline(std::cin, answer));
+}
+
+// Whole positive number, or 0 for anything else.
+static int toQuantity(const std::string& text) {
+  if (text.empty() || text.size() > 7) return 0;
+  for (char c : text) {
+    if (!std::isdigit(static_cast<unsigned char>(c))) return 0;
+  }
+  return std::stoi(text);
+}
+
+static void printInventoryTable(const OrderService& service) {
+  std::cout << "Inventory      ";
+  for (int id = 1; id <= kClusterSize; id++) std::cout << "Node " << id << "  ";
+  std::cout << "\n";
+  for (const auto& item : service.getBook(1).getInventory()) {
+    size_t pad = item.first.size() < 13 ? 13 - item.first.size() : 1;
+    std::cout << "  " << item.first << std::string(pad, ' ');
+    for (int id = 1; id <= kClusterSize; id++) {
+      std::cout << service.getBook(id).getStock(item.first) << "       ";
+    }
+    std::cout << "\n";
+  }
+  std::cout << (service.replicasAgree() ? "All nodes agree.\n"
+                                        : "Nodes differ (a stopped node has not caught up yet).\n");
+}
+
+static void printLeader(RaftCluster& cluster) {
+  int leader = cluster.findLeader();
+  if (leader == -1) {
+    std::cout << "Leader: none (no majority of nodes running)\n";
+  } else {
+    std::cout << "Leader: Node " << leader << " (term "
+              << cluster.getEngine(leader)->getCurrentTerm() << ")\n";
+  }
+}
+
+static void createOrder(RaftCluster& cluster, OrderService& service) {
+  std::string node, id, product, qty;
+  int leader = cluster.findLeader();
+  if (!ask("Send to node (1-3, Enter = leader): ", node)) return;
+  if (!ask("Order ID (e.g. O201): ", id)) return;
+  if (!ask("Product (e.g. LAPTOP): ", product)) return;
+  if (!ask("Quantity: ", qty)) return;
+
+  int receiving = node.empty() ? leader : toQuantity(node);
+  std::cout << "\n";
+  service.submitOrder(receiving, toUpper(id), toUpper(product), toQuantity(qty));
+}
+
+static void stopNode(RaftCluster& cluster, OrderService& service) {
+  std::string answer;
+  int leader = cluster.findLeader();
+  if (!ask("Node to stop (Enter = current leader): ", answer)) return;
+  int id = answer.empty() ? leader : toQuantity(answer);
+  if (id < 1 || id > kClusterSize || !cluster.getNode(id)->isActive()) {
+    std::cout << "That node is not running.\n";
+    return;
+  }
+  cluster.stopNode(id);
+  std::cout << "Node " << id << " stopped. Running the cluster...\n";
+  service.waitForLeader(500);
+  service.runTicks(20);
+  printLeader(cluster);
+}
+
+static void restartNodes(RaftCluster& cluster, OrderService& service) {
+  int restarted = 0;
+  for (int id = 1; id <= kClusterSize; id++) {
+    if (!cluster.getNode(id)->isActive()) {
+      cluster.startNode(id);
+      std::cout << "Node " << id << " restarted.\n";
+      restarted++;
+    }
+  }
+  if (restarted == 0) {
+    std::cout << "All nodes are already running.\n";
+    return;
+  }
+  service.runTicks(50);
+  std::cout << "Catch-up done.\n";
+  printLeader(cluster);
+  printInventoryTable(service);
+}
+
+static void printMenu() {
+  std::cout << "\n------------- NodeSync -------------\n"
+            << " 1. Create order\n"
+            << " 2. View inventory (all nodes)\n"
+            << " 3. View orders\n"
+            << " 4. View Raft cluster and log status\n"
+            << " 5. Stop a node (simulate failure)\n"
+            << " 6. Restart stopped nodes\n"
+            << " 7. Run scripted demo (fresh cluster)\n"
+            << " 8. Run original Phase 1-3 demos\n"
+            << " 0. Exit\n";
+}
+
+int main(int argc, char* argv[]) {
+  std::string mode = argc > 1 ? argv[1] : "";
+  if (mode == "--demo") return runOrderDemo(true) ? 0 : 1;
+  if (mode == "--foundations") return runFoundationDemos();
+
+  RaftCluster cluster(kClusterSize, 50, 20, 10);
+  OrderService service(cluster);
+  service.setVerbose(true);
+  service.setStock("LAPTOP", 2);
+  service.setStock("MOUSE", 3);
+
+  std::cout << "========================================\n"
+            << "  NodeSync - Raft Order Simulator\n"
+            << "========================================\n"
+            << "Cluster size: " << kClusterSize << " nodes (majority = "
+            << kClusterSize / 2 + 1 << ")\n";
+  cluster.startAll();
+  service.waitForLeader(500);
+  service.runTicks(20);
+  cluster.printState();
+  printLeader(cluster);
+  printInventoryTable(service);
+
+  std::string choice;
+  while (true) {
+    printMenu();
+    if (!ask("Choice: ", choice)) break;
+    std::cout << "\n";
+    if (choice == "1") {
+      createOrder(cluster, service);
+    } else if (choice == "2") {
+      printInventoryTable(service);
+    } else if (choice == "3") {
+      int leader = cluster.findLeader();
+      service.printOrders(leader != -1 ? leader : 1);
+    } else if (choice == "4") {
+      cluster.printState();
+      printLeader(cluster);
+    } else if (choice == "5") {
+      stopNode(cluster, service);
+    } else if (choice == "6") {
+      restartNodes(cluster, service);
+    } else if (choice == "7") {
+      runOrderDemo(true);
+    } else if (choice == "8") {
+      runFoundationDemos();
+    } else if (choice == "0") {
+      break;
+    } else {
+      std::cout << "Unknown option.\n";
+    }
+  }
+  std::cout << "Goodbye.\n";
   return 0;
 }
