@@ -37,6 +37,8 @@ add_library(nodesync_core STATIC
     cpp/src/LoadBalancer.cpp
     cpp/src/RaftEngine.cpp
     cpp/src/RaftCluster.cpp
+    cpp/include/OrderService.h
+    cpp/src/OrderService.cpp
 )
 target_link_libraries(nodesync_core PUBLIC dsa_c)
 
