@@ -175,3 +175,23 @@ add_executable(test_log_replication
 )
 target_link_libraries(test_log_replication PRIVATE nodesync_core)
 add_test(NAME LogReplicationTests COMMAND test_log_replication)
+
+add_executable(test_order_book
+    cpp/tests/test_order_book.cpp
+)
+target_link_libraries(test_order_book PRIVATE nodesync_core)
+add_test(NAME OrderBookTests COMMAND test_order_book)
+
+# Orders through Raft commitment
+add_executable(test_order_service
+    cpp/tests/test_order_service.cpp
+)
+target_link_libraries(test_order_service PRIVATE nodesync_core)
+add_test(NAME OrderServiceTests COMMAND test_order_service)
+
+# Orders under node failures
+add_executable(test_order_failover
+    cpp/tests/test_order_failover.cpp
+)
+target_link_libraries(test_order_failover PRIVATE nodesync_core)
+add_test(NAME OrderFailoverTests COMMAND test_order_failover)
