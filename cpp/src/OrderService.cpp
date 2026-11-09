@@ -36,6 +36,17 @@ std::string submitOutcomeToString(SubmitOutcome outcome)
     }
 }
 
+std::string readOutcomeToString(ReadOutcome outcome)
+{
+    switch (outcome) {
+        case ReadOutcome::OK:              return "OK";
+        case ReadOutcome::NOT_FOUND:       return "NOT_FOUND";
+        case ReadOutcome::INVALID_REQUEST: return "INVALID_REQUEST";
+        case ReadOutcome::NODE_DOWN:       return "NODE_DOWN";
+        default:                           return "UNKNOWN";
+    }
+}
+
 // ── Setup ──────────────────────────────────────────────────────────
 
 OrderService::OrderService(RaftCluster& cluster)
@@ -252,6 +263,106 @@ SubmitResult OrderService::submitOrder(int receivingNode,
         if (!r.order.reason.empty()) std::cout << " (" << r.order.reason << ")";
         std::cout << " | " << product << " stock now "
                   << books_[leader - 1].getStock(product) << "\n";
+    }
+    return r;
+}
+
+// ── Read requests ──────────────────────────────────────────────────
+
+static const std::string kGetStock = "GET_STOCK|";
+static const std::string kGetOrder = "GET_ORDER|";
+
+static bool startsWith(const std::string& text, const std::string& prefix)
+{
+    return text.compare(0, prefix.size(), prefix) == 0;
+}
+
+bool OrderService::isReadCommand(const std::string& command)
+{
+    return startsWith(command, kGetStock) || startsWith(command, kGetOrder);
+}
+
+std::string OrderService::makeGetStock(const std::string& product) { return kGetStock + product; }
+std::string OrderService::makeGetOrder(const std::string& orderId) { return kGetOrder + orderId; }
+
+ReadResult OrderService::read(int servingNode, const std::string& command)
+{
+    ReadResult r;
+    r.servingNode = servingNode;
+
+    // 1. Which read, and is it well-formed?  ("GET_STOCK|LAPTOP")
+    bool stockRead = startsWith(command, kGetStock);
+    std::string arg = isReadCommand(command)
+                          ? command.substr(stockRead ? kGetStock.size() : kGetOrder.size())
+                          : "";
+    if (arg.empty() || arg.find('|') != std::string::npos) {
+        r.outcome = ReadOutcome::INVALID_REQUEST;
+        r.message = "malformed read (use GET_STOCK|<product> or GET_ORDER|<orderId>)";
+        if (verbose_) std::cout << "[READ] Rejected: " << r.message << "\n";
+        return r;
+    }
+
+    // 2. The serving node must be running.
+    Node* node = cluster_.getNode(servingNode);
+    if (node == nullptr || !node->isActive()) {
+        r.outcome = ReadOutcome::NODE_DOWN;
+        r.message = "Node " + std::to_string(servingNode) + " is not running";
+        if (verbose_) std::cout << "[READ] Failed: " << r.message << "\n";
+        return r;
+    }
+
+    // 3. Answer from this node's own copy of the state (no Raft round).
+    const OrderBook& book = books_[servingNode - 1];
+    if (stockRead) {
+        if (book.getInventory().count(arg) == 0) {
+            r.outcome = ReadOutcome::NOT_FOUND;
+            r.message = "unknown product " + arg;
+        } else {
+            r.outcome = ReadOutcome::OK;
+            r.stock   = book.getStock(arg);
+            r.message = arg + " stock = " + std::to_string(r.stock);
+        }
+    } else {
+        const Order* order = book.getOrder(arg);
+        if (order == nullptr) {
+            r.outcome = ReadOutcome::NOT_FOUND;
+            r.message = "no order " + arg + " on this server";
+        } else {
+            r.outcome = ReadOutcome::OK;
+            r.order   = *order;
+            r.message = arg + " is " + orderStatusToString(order->status);
+            if (!order->reason.empty()) r.message += " (" + order->reason + ")";
+        }
+    }
+
+    // 4. How fresh is that copy?  Compare with what the leader has committed.
+    //    A newly elected leader does not yet know the full commit point:
+    //    entries from earlier terms in its log may already be committed,
+    //    but Raft only lets it count them once it commits an entry of its
+    //    OWN term (current-term rule).  Until then its commit index can be
+    //    too low, so the comparison would wrongly say "up to date".
+    r.appliedIndex = book.getLastAppliedIndex();
+    int leader = cluster_.findLeader();
+    bool leaderSure = false;
+    if (leader != -1) {
+        RaftEngine* engine = cluster_.getEngine(leader);
+        const Storage* log = cluster_.getStorage(leader);
+        r.leaderCommit = engine->getCommitIndex();
+        const LogEntry* atCommit = log->getEntry(r.leaderCommit);
+        leaderSure = log->getLastLogIndex() == r.leaderCommit ||   // nothing pending
+                     (atCommit != nullptr && atCommit->term == engine->getCurrentTerm());
+    }
+    r.possiblyStale = !leaderSure || r.appliedIndex < r.leaderCommit;
+
+    if (verbose_) {
+        std::cout << "[READ] Node " << servingNode << " answered from its own copy: "
+                  << r.message << "\n";
+        std::cout << "[READ] Freshness: applied up to #" << r.appliedIndex;
+        if (leader == -1)                         std::cout << ", no leader to compare with -> MAY BE STALE";
+        else if (!leaderSure)                     std::cout << ", leader has not committed an entry of its own term yet, so it cannot confirm the commit point -> MAY BE STALE";
+        else if (r.appliedIndex < r.leaderCommit) std::cout << ", leader committed #" << r.leaderCommit << " -> STALE (not caught up yet)";
+        else                                      std::cout << ", leader committed #" << r.leaderCommit << " -> up to date";
+        std::cout << "\n";
     }
     return r;
 }

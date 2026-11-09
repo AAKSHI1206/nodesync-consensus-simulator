@@ -46,6 +46,34 @@ struct SubmitResult {
     Order order;                  // valid when outcome == COMMITTED
 };
 
+// ── Read requests ───────────────────────────────────────────────────
+// Reads never go into the Raft log.  The server that receives one
+// answers from its OWN OrderBook:
+//     GET_STOCK|<product>     units of a product in stock
+//     GET_ORDER|<orderId>     an order's status
+// A follower can be behind the leader (it learns new commits on the next
+// AppendEntries, or after a restart it still has to catch up), so the
+// answer says whether it may be stale.
+enum class ReadOutcome {
+    OK,               // answered (see stock / order)
+    NOT_FOUND,        // unknown product or order ID
+    INVALID_REQUEST,  // malformed read command
+    NODE_DOWN         // serving node is stopped / unknown
+};
+
+std::string readOutcomeToString(ReadOutcome outcome);
+
+struct ReadResult {
+    ReadOutcome outcome = ReadOutcome::INVALID_REQUEST;
+    std::string message;          // the answer in words
+    int  servingNode   = 0;
+    int  appliedIndex  = 0;       // log entries this node has applied
+    int  leaderCommit  = -1;      // leader's commit index (-1: no leader)
+    bool possiblyStale = false;   // behind the leader, or no leader to compare with
+    int   stock = 0;              // GET_STOCK answer
+    Order order;                  // GET_ORDER answer (when found)
+};
+
 class OrderService {
 public:
     // The cluster must outlive this service.
@@ -62,6 +90,15 @@ public:
     // Raft to commit and apply it.
     SubmitResult submitOrder(int receivingNode, const std::string& orderId,
                              const std::string& product, int quantity);
+
+    // Answer a read from `servingNode`'s own OrderBook (no Raft round).
+    ReadResult read(int servingNode, const std::string& command);
+
+    // Read command helpers.  isReadCommand() only looks at the prefix,
+    // so a malformed read is still recognised (and rejected) as a read.
+    static bool        isReadCommand(const std::string& command);
+    static std::string makeGetStock(const std::string& product);
+    static std::string makeGetOrder(const std::string& orderId);
 
     // Simulation helpers.  Network warnings about stopped nodes are
     // hidden while these run, to keep the demo output readable.
