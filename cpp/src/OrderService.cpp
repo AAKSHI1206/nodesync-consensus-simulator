@@ -1,6 +1,9 @@
 #include "OrderService.h"
+#include "LoadBalancer.h"
 #include <iostream>
+#include <memory>
 #include <streambuf>
+#include <vector>
 
 /*
  * OrderService.cpp
@@ -142,7 +145,7 @@ SubmitResult OrderService::submitOrder(int receivingNode,
     std::string command = OrderBook::makeCreateOrder(orderId, product, quantity);
 
     if (verbose_) {
-        std::cout << "[CLIENT] Order " << orderId << " (" << product << " x"
+        std::cout << "[ORDER] " << orderId << " (" << product << " x"
                   << quantity << ") sent to Node " << receivingNode << "\n";
     }
 
@@ -393,8 +396,16 @@ void OrderService::printOrders(int nodeId) const
 
 // ── Scripted demo ──────────────────────────────────────────────────
 
+// The full path through the load balancer:
+//   write: customer -> LoadBalancer -> leader's Server -> Raft -> commit
+//          -> every node's OrderBook
+//   read:  customer -> LoadBalancer (hash ring) -> that Server, which
+//          answers from its own OrderBook
 bool runOrderDemo(bool verbose)
 {
+    std::unique_ptr<QuietCout> quiet;
+    if (!verbose) quiet = std::make_unique<QuietCout>();   // tests: no output
+
     bool ok = true;
     auto expect = [&](bool condition, const std::string& what) {
         if (verbose) std::cout << (condition ? "  [OK] " : "  [MISMATCH] ") << what << "\n";
@@ -410,7 +421,51 @@ bool runOrderDemo(bool verbose)
     service.setStock("LAPTOP", 2);
     service.setStock("MOUSE", 3);
 
-    section("1. Start 3 nodes and elect a leader");
+    // Three Raft-backed servers behind one load balancer.
+    Network unusedNet;
+    std::vector<std::unique_ptr<Server>> servers;
+    LoadBalancer lb(RoutingPolicy::CONSISTENT_HASH);
+    for (int id = 1; id <= 3; id++) {
+        servers.push_back(std::make_unique<Server>(id, &unusedNet));
+        servers.back()->attachToCluster(&cluster, &service);
+        lb.registerServer(servers.back().get());
+    }
+    auto customerOn = [&](int serverId) {
+        for (int n = 1; n < 1000; n++) {
+            std::string c = "C" + std::to_string(n);
+            if (lb.serverFor(c) == serverId) return c;
+        }
+        return std::string();
+    };
+    auto order = [&](const std::string& customer, const std::string& id,
+                     const std::string& product, int qty) {
+        bool routed = lb.routeRequest(ClientRequest{id, OrderBook::makeCreateOrder(id, product, qty), customer});
+        if (lb.getLastServerId() == -1) {
+            SubmitResult none;
+            none.message = routed ? "" : "refused by the load balancer";
+            return none;
+        }
+        return servers[lb.getLastServerId() - 1]->getLastResult();
+    };
+    int readNo = 1;
+    auto read = [&](const std::string& customer, const std::string& command) {
+        lb.routeRequest(ClientRequest{"R" + std::to_string(readNo++), command, customer});
+        if (lb.getLastServerId() == -1) return ReadResult();
+        return servers[lb.getLastServerId() - 1]->getLastRead();
+    };
+    auto routingTable = [&]() {
+        if (!verbose) return;
+        std::cout << "Reads (hash ring on customer ID):";
+        for (int n = 1; n <= 6; n++) {
+            std::string c = "C" + std::to_string(n);
+            int s = lb.serverFor(c);
+            std::cout << "  " << c << "->" << (s == -1 ? std::string("none") : "S" + std::to_string(s));
+        }
+        int l = lb.leaderServer();
+        std::cout << "\nWrites: always -> " << (l == -1 ? std::string("(no leader)") : "leader Server " + std::to_string(l)) << "\n";
+    };
+
+    section("1. Start 3 servers and elect a Raft leader");
     cluster.startAll();
     int leader = service.waitForLeader(500);
     expect(leader != -1, "a leader was elected");
@@ -419,53 +474,104 @@ bool runOrderDemo(bool verbose)
         cluster.printState();
         service.printInventory(leader);
     }
+    routingTable();
     int follower = (leader % 3) + 1;
+    std::string onFollower = customerOn(follower);
+    std::string onLeader = customerOn(leader);
 
-    section("2. O101: 1 laptop, sent to a follower");
-    SubmitResult r1 = service.submitOrder(follower, "O101", "LAPTOP", 1);
-    expect(r1.forwarded, "follower forwarded the order to the leader");
+    section("2. Customer " + onFollower + " orders 1 laptop (a write goes to the leader)");
+    SubmitResult r1 = order(onFollower, "O101", "LAPTOP", 1);
+    expect(lb.getLastServerId() == leader, "load balancer sent the write to leader Server " + std::to_string(leader));
+    expect(!r1.forwarded, "no forwarding needed: it arrived at the leader");
     expect(r1.outcome == SubmitOutcome::COMMITTED &&
-           r1.order.status == OrderStatus::ACCEPTED, "O101 accepted");
-    expect(service.getBook(leader).getStock("LAPTOP") == 1, "LAPTOP stock 2 -> 1");
+           r1.order.status == OrderStatus::ACCEPTED, "O101 committed by a majority and accepted");
+    expect(service.getBook(leader).getStock("LAPTOP") == 1, "LAPTOP stock 2 -> 1 on the leader");
 
-    section("3. O102: 1 laptop");
-    SubmitResult r2 = service.submitOrder(leader, "O102", "LAPTOP", 1);
+    section("3. " + onFollower + " checks the laptop stock (a read goes to its hashed server)");
+    ReadResult q1 = read(onFollower, OrderService::makeGetStock("LAPTOP"));
+    expect(lb.getLastServerId() == follower, "hash ring sent the read to Server " + std::to_string(follower));
+    expect(q1.outcome == ReadOutcome::OK, "Server " + std::to_string(follower) + " answered from its own copy");
+    // Right after the commit the follower may not have heard the new commit
+    // index yet (it arrives with the next AppendEntries): then the answer is
+    // the old value and is marked stale.  Either way it must be consistent.
+    expect(q1.possiblyStale ? q1.stock == 2 : q1.stock == 1,
+           q1.possiblyStale ? "answer 2 is marked STALE (follower has not applied O101 yet)"
+                            : "answer 1 is up to date");
+    service.runTicks(20);
+    ReadResult q2 = read(onFollower, OrderService::makeGetStock("LAPTOP"));
+    expect(q2.outcome == ReadOutcome::OK && !q2.possiblyStale && q2.stock == 1,
+           "after the next heartbeat the follower answers 1, up to date");
+
+    section("4. Customer " + onLeader + " orders the last laptop");
+    SubmitResult r2 = order(onLeader, "O102", "LAPTOP", 1);
     expect(r2.outcome == SubmitOutcome::COMMITTED &&
            r2.order.status == OrderStatus::ACCEPTED, "O102 accepted");
     expect(service.getBook(leader).getStock("LAPTOP") == 0, "LAPTOP stock 1 -> 0");
 
-    section("4. O103: 1 laptop, but none left");
-    SubmitResult r3 = service.submitOrder(leader, "O103", "LAPTOP", 1);
+    section("5. " + onFollower + " orders 1 more laptop, but none are left");
+    SubmitResult r3 = order(onFollower, "O103", "LAPTOP", 1);
+    expect(lb.getLastServerId() == leader, "the write again went to the leader");
     expect(r3.outcome == SubmitOutcome::COMMITTED &&
-           r3.order.status == OrderStatus::REJECTED, "O103 rejected (insufficient stock)");
-    expect(service.getBook(leader).getStock("LAPTOP") == 0, "LAPTOP stock stays 0");
+           r3.order.status == OrderStatus::REJECTED, "O103 committed but rejected (insufficient stock)");
+    service.runTicks(20);
+    ReadResult q3 = read(onFollower, OrderService::makeGetOrder("O103"));
+    expect(q3.outcome == ReadOutcome::OK && q3.order.status == OrderStatus::REJECTED,
+           onFollower + " reads O103's status from Server " + std::to_string(follower) + ": REJECTED");
 
-    section("5. Leader fails; a new leader is elected");
-    if (verbose) std::cout << "Stopping leader Node " << leader << "\n";
-    cluster.stopNode(leader);
+    section("6. Server " + std::to_string(follower) + " crashes; only its customers' reads move");
+    std::string kept = customerOn(leader);
+    servers[follower - 1]->stop();
+    routingTable();
+    int moved = lb.serverFor(onFollower);
+    expect(moved != follower && moved != -1, onFollower + "'s reads now go to Server " + std::to_string(moved));
+    expect(lb.serverFor(kept) == leader, kept + " still reads from Server " + std::to_string(leader));
+    SubmitResult r4 = order(onFollower, "O104", "MOUSE", 1);
+    expect(r4.outcome == SubmitOutcome::COMMITTED &&
+           r4.order.status == OrderStatus::ACCEPTED, "O104 committed with 2 of 3 servers");
+
+    section("7. Server " + std::to_string(follower) + " restarts: a read before it catches up is stale");
+    servers[follower - 1]->start();
+    expect(lb.serverFor(onFollower) == follower, onFollower + " is back on Server " + std::to_string(follower));
+    ReadResult q4 = read(onFollower, OrderService::makeGetStock("MOUSE"));
+    expect(q4.possiblyStale && q4.stock == 3,
+           "it still says MOUSE 3 and marks it STALE (it missed O104 while down)");
+    service.runTicks(50);
+    ReadResult q5 = read(onFollower, OrderService::makeGetStock("MOUSE"));
+    expect(!q5.possiblyStale && q5.stock == 2, "after catching up: MOUSE 2, up to date");
+
+    section("8. The leader crashes: writes wait for a new leader, reads keep working");
+    servers[leader - 1]->stop();
+    SubmitResult r5 = order(onFollower, "O105", "MOUSE", 1);
+    expect(lb.getLastServerId() == -1, "no leader yet: the load balancer refuses the write");
+    ReadResult q6 = read(onFollower, OrderService::makeGetStock("MOUSE"));
+    expect(q6.outcome == ReadOutcome::OK && q6.possiblyStale,
+           "the read is still answered, marked 'may be stale' (no leader to compare with)");
     int newLeader = service.waitForLeader(500);
-    expect(newLeader != -1 && newLeader != leader, "a different node became leader");
+    expect(newLeader != -1 && newLeader != leader, "Raft elected a different leader");
     if (newLeader == -1) return false;
     if (verbose) cluster.printState();
+    routingTable();
+    SubmitResult r6 = order(onLeader, "O105", "MOUSE", 2);
+    expect(lb.getLastServerId() == newLeader, "writes now go to the new leader Server " + std::to_string(newLeader));
+    expect(r6.outcome == SubmitOutcome::COMMITTED &&
+           r6.order.status == OrderStatus::ACCEPTED, "O105 accepted under the new leader");
+    expect(service.getBook(newLeader).getStock("MOUSE") == 0, "MOUSE stock 2 -> 0");
+    (void)r5;
 
-    section("6. O104: 2 mice, handled by the new leader");
-    SubmitResult r4 = service.submitOrder(newLeader, "O104", "MOUSE", 2);
-    expect(r4.outcome == SubmitOutcome::COMMITTED &&
-           r4.order.status == OrderStatus::ACCEPTED, "O104 accepted by the new leader");
-    expect(service.getBook(newLeader).getStock("MOUSE") == 1, "MOUSE stock 3 -> 1");
-
-    section("7. Old leader restarts and catches up");
-    cluster.startNode(leader);
+    section("9. The old leader restarts and catches up");
+    servers[leader - 1]->start();
     service.runTicks(50);
-    expect(service.getBook(leader).getStock("MOUSE") == 1,
-           "old leader applied O104 after restarting");
+    expect(service.getBook(leader).getStock("MOUSE") == 0,
+           "old leader applied every order after restarting");
     expect(service.replicasAgree(), "all 3 nodes have identical inventory and orders");
     if (verbose) {
         cluster.printState();
         service.printInventory(newLeader);
         service.printOrders(newLeader);
-        std::cout << "\nDemo " << (ok ? "completed: every result matched."
-                                      : "found a MISMATCH (see above).") << "\n";
+        std::cout << "Requests received per server:";
+        for (auto& s : servers) std::cout << "  S" << s->getId() << "=" << s->getLoad();
+        std::cout << "\n\nDemo " << (ok ? "completed: every result matched."
+                                        : "found a MISMATCH (see above).") << "\n";
     }
     return ok;
 }

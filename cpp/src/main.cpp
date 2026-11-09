@@ -19,6 +19,7 @@
 #include <cctype>
 #include <iostream>
 #include <string>
+#include <vector>
 
 #include "Storage.h"
 #include "Node.h"
@@ -281,7 +282,7 @@ static int runFoundationDemos() {
  * RaftCluster and OrderService)
  * ================================================================ */
 
-static const int kClusterSize = 3;
+static const int kClusterSize = 5;   // interactive menu (the scripted --demo keeps its own 3-node cluster)
 
 static std::string toUpper(std::string text) {
   for (char& c : text) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
@@ -329,46 +330,83 @@ static void printLeader(RaftCluster& cluster) {
   }
 }
 
-static void createOrder(RaftCluster& cluster, OrderService& service) {
-  std::string node, id, product, qty;
-  int leader = cluster.findLeader();
-  if (!ask("Send to node (1-3, Enter = leader): ", node)) return;
-  if (!ask("Order ID (e.g. O201): ", id)) return;
+// Write: client -> LoadBalancer -> leader's Server -> Raft (majority commit)
+static void createOrder(LoadBalancer& lb, int& nextOrder) {
+  std::string customer, product, qty;
+  if (!ask("Customer ID (e.g. C1): ", customer)) return;
   if (!ask("Product (e.g. LAPTOP): ", product)) return;
   if (!ask("Quantity: ", qty)) return;
 
-  int receiving = node.empty() ? leader : toQuantity(node);
+  std::string id = "O" + std::to_string(nextOrder++);
   std::cout << "\n";
-  service.submitOrder(receiving, toUpper(id), toUpper(product), toQuantity(qty));
+  lb.routeRequest(ClientRequest{id, OrderBook::makeCreateOrder(id, toUpper(product), toQuantity(qty)),
+                                toUpper(customer)});
 }
 
-static void stopNode(RaftCluster& cluster, OrderService& service) {
-  std::string answer;
-  int leader = cluster.findLeader();
-  if (!ask("Node to stop (Enter = current leader): ", answer)) return;
-  int id = answer.empty() ? leader : toQuantity(answer);
-  if (id < 1 || id > kClusterSize || !cluster.getNode(id)->isActive()) {
-    std::cout << "That node is not running.\n";
+// Read: client -> LoadBalancer (hash ring on the customer) -> that Server,
+// which answers from its own copy (it says if the copy may be stale).
+static void readRequest(LoadBalancer& lb, int& nextRead) {
+  std::string customer, what, value;
+  if (!ask("Customer ID (e.g. C1): ", customer)) return;
+  if (!ask("Read what? 1 = stock of a product, 2 = status of an order: ", what)) return;
+  std::string command;
+  if (what == "1") {
+    if (!ask("Product (e.g. LAPTOP): ", value)) return;
+    command = OrderService::makeGetStock(toUpper(value));
+  } else if (what == "2") {
+    if (!ask("Order ID (e.g. O101): ", value)) return;
+    command = OrderService::makeGetOrder(toUpper(value));
+  } else {
+    std::cout << "Unknown choice.\n";
     return;
   }
-  cluster.stopNode(id);
-  std::cout << "Node " << id << " stopped. Running the cluster...\n";
+  std::cout << "\n";
+  lb.routeRequest(ClientRequest{"R" + std::to_string(nextRead++), command, toUpper(customer)});
+}
+
+// Where requests go right now.
+static void showRouting(LoadBalancer& lb, RaftCluster& cluster) {
+  int leader = lb.leaderServer();
+  std::cout << "Writes (orders): always -> "
+            << (leader == -1 ? "no leader right now (writes are refused until one is elected)"
+                             : "leader Server " + std::to_string(leader)) << "\n";
+  std::cout << "Reads (stock / order status): each customer ID is hashed onto a ring of servers.\n";
+  for (int n = 1; n <= 9; n++) {
+    std::string c = "C" + std::to_string(n);
+    int s = lb.serverFor(c);
+    std::cout << "  " << c << " -> " << (s == -1 ? "no server running" : "Server " + std::to_string(s));
+    if (s != -1 && s == cluster.findLeader()) std::cout << " (leader)";
+    std::cout << "\n";
+  }
+}
+
+static void stopServer(RaftCluster& cluster, OrderService& service, std::vector<Server>& servers) {
+  std::string answer;
+  int leader = cluster.findLeader();
+  if (!ask("Server to stop (Enter = current leader): ", answer)) return;
+  int id = answer.empty() ? leader : toQuantity(answer);
+  if (id < 1 || id > kClusterSize || !servers[id - 1].isRunning()) {
+    std::cout << "That server is not running.\n";
+    return;
+  }
+  servers[id - 1].stop();
+  std::cout << "Server " << id << " stopped. Running the cluster...\n";
   service.waitForLeader(500);
   service.runTicks(20);
   printLeader(cluster);
 }
 
-static void restartNodes(RaftCluster& cluster, OrderService& service) {
+static void restartServers(RaftCluster& cluster, OrderService& service, std::vector<Server>& servers) {
   int restarted = 0;
-  for (int id = 1; id <= kClusterSize; id++) {
-    if (!cluster.getNode(id)->isActive()) {
-      cluster.startNode(id);
-      std::cout << "Node " << id << " restarted.\n";
+  for (Server& s : servers) {
+    if (!s.isRunning()) {
+      s.start();
+      std::cout << "Server " << s.getId() << " restarted.\n";
       restarted++;
     }
   }
   if (restarted == 0) {
-    std::cout << "All nodes are already running.\n";
+    std::cout << "All servers are already running.\n";
     return;
   }
   service.runTicks(50);
@@ -379,14 +417,16 @@ static void restartNodes(RaftCluster& cluster, OrderService& service) {
 
 static void printMenu() {
   std::cout << "\n------------- NodeSync -------------\n"
-            << " 1. Create order\n"
-            << " 2. View inventory (all nodes)\n"
-            << " 3. View orders\n"
-            << " 4. View Raft cluster and log status\n"
-            << " 5. Stop a node (simulate failure)\n"
-            << " 6. Restart stopped nodes\n"
-            << " 7. Run scripted demo (fresh cluster)\n"
-            << " 8. Run original Phase 1-3 demos\n"
+            << " 1. Create order    (write: load balancer -> leader -> Raft)\n"
+            << " 2. Check stock or an order (read: load balancer -> hashed server)\n"
+            << " 3. View inventory (all nodes)\n"
+            << " 4. View orders\n"
+            << " 5. View Raft cluster and log status\n"
+            << " 6. Show routing (writes and reads)\n"
+            << " 7. Stop a server (simulate failure)\n"
+            << " 8. Restart stopped servers\n"
+            << " 9. Run scripted demo (fresh cluster)\n"
+            << "10. Run original Phase 1-3 demos\n"
             << " 0. Exit\n";
 }
 
@@ -401,11 +441,26 @@ int main(int argc, char* argv[]) {
   service.setStock("LAPTOP", 2);
   service.setStock("MOUSE", 3);
 
+  // One Raft-backed server per node, behind a consistent-hashing load balancer.
+  Network unusedNet;   // Server's own network; not used in Raft-backed mode
+  std::vector<Server> servers;
+  servers.reserve(kClusterSize);   // no reallocation: the load balancer keeps pointers
+  for (int id = 1; id <= kClusterSize; id++) servers.emplace_back(id, &unusedNet);
+  LoadBalancer lb(RoutingPolicy::CONSISTENT_HASH);
+  for (Server& s : servers) {
+    s.attachToCluster(&cluster, &service);
+    lb.registerServer(&s);
+  }
+  int nextOrder = 101;
+  int nextRead = 1;
+
   std::cout << "========================================\n"
             << "  NodeSync - Raft Order Simulator\n"
             << "========================================\n"
-            << "Cluster size: " << kClusterSize << " nodes (majority = "
-            << kClusterSize / 2 + 1 << ")\n";
+            << "Cluster size: " << kClusterSize << " servers (majority = "
+            << kClusterSize / 2 + 1 << ")\n"
+            << "Writes: customer -> load balancer -> leader -> Raft (majority commit)\n"
+            << "Reads:  customer -> load balancer (consistent hashing) -> that server's own copy\n";
   cluster.startAll();
   service.waitForLeader(500);
   service.runTicks(20);
@@ -419,22 +474,26 @@ int main(int argc, char* argv[]) {
     if (!ask("Choice: ", choice)) break;
     std::cout << "\n";
     if (choice == "1") {
-      createOrder(cluster, service);
+      createOrder(lb, nextOrder);
     } else if (choice == "2") {
-      printInventoryTable(service);
+      readRequest(lb, nextRead);
     } else if (choice == "3") {
+      printInventoryTable(service);
+    } else if (choice == "4") {
       int leader = cluster.findLeader();
       service.printOrders(leader != -1 ? leader : 1);
-    } else if (choice == "4") {
+    } else if (choice == "5") {
       cluster.printState();
       printLeader(cluster);
-    } else if (choice == "5") {
-      stopNode(cluster, service);
     } else if (choice == "6") {
-      restartNodes(cluster, service);
+      showRouting(lb, cluster);
     } else if (choice == "7") {
-      runOrderDemo(true);
+      stopServer(cluster, service, servers);
     } else if (choice == "8") {
+      restartServers(cluster, service, servers);
+    } else if (choice == "9") {
+      runOrderDemo(true);
+    } else if (choice == "10") {
       runFoundationDemos();
     } else if (choice == "0") {
       break;
