@@ -31,7 +31,6 @@ add_library(dsa_c STATIC
 add_library(nodesync_core STATIC
     cpp/src/Node.cpp
     cpp/src/Message.cpp
-    cpp/src/ConsistentHashRing.cpp
     cpp/src/Network.cpp
     cpp/src/Storage.cpp
     cpp/src/Server.cpp
@@ -40,6 +39,7 @@ add_library(nodesync_core STATIC
     cpp/src/RaftCluster.cpp
     cpp/src/OrderBook.cpp
     cpp/src/OrderService.cpp
+    cpp/src/ConsistentHashRing.cpp
 )
 target_link_libraries(nodesync_core PUBLIC dsa_c)
 
@@ -205,3 +205,10 @@ add_executable(test_consistent_hash
 )
 target_link_libraries(test_consistent_hash PRIVATE nodesync_core)
 add_test(NAME ConsistentHashTests COMMAND test_consistent_hash)
+
+# Client -> load balancer -> server -> Raft
+add_executable(test_routed_orders
+    cpp/tests/test_routed_orders.cpp
+)
+target_link_libraries(test_routed_orders PRIVATE nodesync_core)
+add_test(NAME RoutedOrderTests COMMAND test_routed_orders)
