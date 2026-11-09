@@ -31,6 +31,7 @@ add_library(dsa_c STATIC
 add_library(nodesync_core STATIC
     cpp/src/Node.cpp
     cpp/src/Message.cpp
+    cpp/src/ConsistentHashRing.cpp
     cpp/src/Network.cpp
     cpp/src/Storage.cpp
     cpp/src/Server.cpp
@@ -195,3 +196,12 @@ add_executable(test_order_failover
 )
 target_link_libraries(test_order_failover PRIVATE nodesync_core)
 add_test(NAME OrderFailoverTests COMMAND test_order_failover)
+
+# ── Load balancer → Raft ──────────────────────────────────────────────
+
+# Consistent hash ring
+add_executable(test_consistent_hash
+    cpp/tests/test_consistent_hash.cpp
+)
+target_link_libraries(test_consistent_hash PRIVATE nodesync_core)
+add_test(NAME ConsistentHashTests COMMAND test_consistent_hash)
