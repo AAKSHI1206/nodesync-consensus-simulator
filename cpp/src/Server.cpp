@@ -10,23 +10,85 @@
  * LoadBalancer.  Simulates Raft leader behavior by appending
  * entries to local Storage and broadcasting APPEND_ENTRIES
  * to peers via the existing Network.
+ *
+ * In Raft-backed mode (attachToCluster) writes go through OrderService
+ * to the real Raft leader, and reads are answered from this node's own
+ * OrderBook.
  */
 
 Server::Server(int id, Network *network)
     : node_(id), storage_(), network_(network), currentTerm_(1) {}
 
-void Server::start() { node_.start(); }
+void Server::attachToCluster(RaftCluster *cluster, OrderService *service) {
+  cluster_ = cluster;
+  service_ = service;
+}
 
-void Server::stop() { node_.stop(); }
+bool Server::isAttached() const { return cluster_ != nullptr && service_ != nullptr; }
 
-bool Server::isRunning() const { return node_.isActive(); }
+const SubmitResult &Server::getLastResult() const { return lastResult_; }
+
+const ReadResult &Server::getLastRead() const { return lastRead_; }
+
+bool Server::isLeader() const {
+  if (!isAttached() || !isRunning()) return false;
+  return cluster_->getEngine(getId())->getRole() == RaftRole::LEADER;
+}
+
+void Server::start() {
+  if (isAttached()) cluster_->startNode(getId());
+  else node_.start();
+}
+
+void Server::stop() {
+  if (isAttached()) cluster_->stopNode(getId());
+  else node_.stop();
+}
+
+bool Server::isRunning() const {
+  if (isAttached()) {
+    Node *node = cluster_->getNode(getId());
+    return node != nullptr && node->isActive();
+  }
+  return node_.isActive();
+}
 
 int Server::getId() const { return node_.getId(); }
 
-Node *Server::getNode() { return &node_; }
+Node *Server::getNode() {
+  return isAttached() ? cluster_->getNode(getId()) : &node_;
+}
 
 bool Server::handleRequest(const std::string &orderId,
                            const std::string &command) {
+  if (isAttached()) {
+    requestsReceived_++;
+
+    // Read: answered here, from this node's own copy of the orders.
+    if (OrderService::isReadCommand(command)) {
+      std::cout << "[SERVER " << getId() << "] Received read " << orderId << " ("
+                << command << ")\n";
+      lastRead_ = service_->read(getId(), command);
+      return lastRead_.outcome == ReadOutcome::OK;
+    }
+
+    // Write: OrderService validates, proposes to the leader and waits
+    // for commitment.  "true" only when committed.
+    std::cout << "[SERVER " << getId() << "] Received request " << orderId << "\n";
+    std::string id, product;
+    int qty = 0;
+    if (!OrderBook::parseCreateOrder(command, id, product, qty)) {
+      lastResult_ = SubmitResult();
+      lastResult_.outcome = SubmitOutcome::INVALID_REQUEST;
+      lastResult_.receivingNode = getId();
+      lastResult_.message = "malformed order command";
+      std::cout << "[SERVER " << getId() << "] Rejected: " << lastResult_.message << "\n";
+      return false;
+    }
+    lastResult_ = service_->submitOrder(getId(), id, product, qty);
+    return lastResult_.outcome == SubmitOutcome::COMMITTED;
+  }
+
   if (!isRunning()) {
     std::cout << "[SERVER " << getId() << "] Not running — cannot handle "
               << orderId << "\n";
@@ -61,9 +123,16 @@ bool Server::handleRequest(const std::string &orderId,
 }
 
 int Server::getLogSize() const {
+  if (isAttached()) return cluster_->getStorage(getId())->getLastLogIndex();
   return static_cast<int>(storage_.getLogSize());
 }
 
-int Server::getLoad() const { return getLogSize(); }
+int Server::getLoad() const {
+  // Under Raft every log is the same, so load = requests received.
+  return isAttached() ? requestsReceived_ : getLogSize();
+}
 
-int Server::getCurrentTerm() const { return currentTerm_; }
+int Server::getCurrentTerm() const {
+  if (isAttached()) return cluster_->getEngine(getId())->getCurrentTerm();
+  return currentTerm_;
+}
