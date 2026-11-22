@@ -15,8 +15,8 @@
  *
  * The simulation loop:
  *   1. Advance currentTime_
- *   2. Deliver all pending messages to the correct engines
- *   3. Tick each active engine
+ *   2. Deliver all pending messages to the correct engines.
+ *   3. Tick each active engine.
  */
 
 RaftCluster::RaftCluster(int size,

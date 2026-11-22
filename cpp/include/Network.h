@@ -17,8 +17,6 @@
  *
  * Messages are stored in per-node mailboxes (queues).
  * No real sockets or threads — this is a simulation.
- *
- * Implemented by: Astik
  */
 
 class Network {

@@ -13,8 +13,6 @@
  * Optional simulated delay (setDelay): a sent message waits in a
  * priority queue ordered by arrival tick; advanceTo(tick) moves the
  * messages that have arrived into their mailboxes.
- *
- * Implemented by: Astik
  */
 
 Network::Network()
