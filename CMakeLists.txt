@@ -212,3 +212,10 @@ add_executable(test_routed_orders
 )
 target_link_libraries(test_routed_orders PRIVATE nodesync_core)
 add_test(NAME RoutedOrderTests COMMAND test_routed_orders)
+
+# Network faults - Sanjam
+add_executable(test_network_delay
+    cpp/tests/test_network_delay.cpp
+)
+target_link_libraries(test_network_delay PRIVATE nodesync_core)
+add_test(NAME NetworkDelayTests COMMAND test_network_delay)
