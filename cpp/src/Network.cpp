@@ -10,6 +10,10 @@
  * sendMessage() puts a message into the receiver's mailbox.
  * receiveMessage() pops a message from the node's mailbox.
  *
+ * Optional simulated delay (setDelay): a sent message waits in a
+ * priority queue ordered by arrival tick; advanceTo(tick) moves the
+ * messages that have arrived into their mailboxes.
+ *
  * Implemented by: Astik
  */
 
@@ -56,16 +60,82 @@ bool Network::sendMessage(const Message& msg)
         return false;
     }
 
+    stats_.sent++;
+
+    // Simulated delay: hold the message back for a random number of
+    // ticks.  Whether the receiver is running is checked when it arrives.
+    if (maxDelay_ > 0) {
+        int span  = maxDelay_ - minDelay_ + 1;
+        int delay = minDelay_ + static_cast<int>(rng_() % static_cast<unsigned int>(span));
+        if (delay > 0) {
+            inFlight_.push(InFlight{now_ + delay, nextOrder_++, msg});
+            stats_.delayed++;
+            return true;
+        }
+    }
+
+    return deliverNow(msg);
+}
+
+// Put a message into the receiver's mailbox (or drop it if the receiver
+// is not running)
+bool Network::deliverNow(const Message& msg)
+{
+    int receiverId = msg.getReceiverId();
+
     // Check that receiver is active
     if (!nodes[receiverId]->isActive()) {
         std::cout << "[Network] Warning: receiver " << receiverId
                   << " is inactive. Message dropped.\n";
+        stats_.droppedReceiverDown++;
         return false;
     }
 
     // Deliver the message to the receiver's mailbox
     mailboxes[receiverId].push(msg);
     return true;
+}
+
+// ── Simulated message delay ────────────────────────────────────────
+
+void Network::setDelay(int minTicks, int maxTicks)
+{
+    if (minTicks < 0) minTicks = 0;
+    if (maxTicks < minTicks) maxTicks = minTicks;
+    minDelay_ = minTicks;
+    maxDelay_ = maxTicks;
+}
+
+int Network::getMinDelay() const { return minDelay_; }
+int Network::getMaxDelay() const { return maxDelay_; }
+
+void Network::setSeed(unsigned int seed)
+{
+    rng_.seed(seed);
+}
+
+void Network::advanceTo(int tick)
+{
+    now_ = tick;
+    // Earliest arrival first; messages arriving in the same tick keep
+    // the order they were sent in.
+    while (!inFlight_.empty() && inFlight_.top().arriveAt <= now_) {
+        Message msg = inFlight_.top().msg;
+        inFlight_.pop();
+        deliverNow(msg);
+    }
+}
+
+int Network::getCurrentTick() const { return now_; }
+
+int Network::getInFlightCount() const
+{
+    return static_cast<int>(inFlight_.size());
+}
+
+const Network::Stats& Network::getStats() const
+{
+    return stats_;
 }
 
 // Broadcast a message from sender to all other registered nodes

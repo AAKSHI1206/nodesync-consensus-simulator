@@ -415,6 +415,30 @@ static void restartServers(RaftCluster& cluster, OrderService& service, std::vec
   printInventoryTable(service);
 }
 
+// Simulated network delay: every message waits a random number of ticks
+// in [min, max], so messages can also arrive out of order.
+static void setNetworkDelay(RaftCluster& cluster, OrderService& service) {
+  Network* net = cluster.getNetwork();
+  std::cout << "Current message delay: " << net->getMinDelay() << "-" << net->getMaxDelay()
+            << " ticks (election timeout 50-70, heartbeat every 10)\n";
+  std::string lo, hi;
+  if (!ask("Minimum delay in ticks (0 = none): ", lo)) return;
+  if (!ask("Maximum delay in ticks: ", hi)) return;
+  int minTicks = lo == "0" ? 0 : toQuantity(lo);
+  int maxTicks = hi == "0" ? 0 : toQuantity(hi);
+  if ((lo != "0" && minTicks == 0) || (hi != "0" && maxTicks == 0) || maxTicks < minTicks) {
+    std::cout << "Enter two whole numbers with min <= max.\n";
+    return;
+  }
+  net->setDelay(minTicks, maxTicks);
+  // Give an order enough ticks to be replicated and acknowledged.
+  service.setMaxWaitTicks(50 + 4 * maxTicks);
+  std::cout << "Messages now take " << minTicks << "-" << maxTicks << " ticks"
+            << (maxTicks > 0 ? " and may arrive out of order." : " (no delay).") << "\n";
+  if (maxTicks >= 50)
+    std::cout << "Note: delays this long exceed the election timeout, so elections may keep failing.\n";
+}
+
 static void printMenu() {
   std::cout << "\n------------- NodeSync -------------\n"
             << " 1. Create order    (write: load balancer -> leader -> Raft)\n"
@@ -427,6 +451,7 @@ static void printMenu() {
             << " 8. Restart stopped servers\n"
             << " 9. Run scripted demo (fresh cluster)\n"
             << "10. Run original Phase 1-3 demos\n"
+            << "11. Network: set message delay (and reordering)\n"
             << " 0. Exit\n";
 }
 
@@ -493,6 +518,8 @@ int main(int argc, char* argv[]) {
       restartServers(cluster, service, servers);
     } else if (choice == "9") {
       runOrderDemo(true);
+    } else if (choice == "11") {
+      setNetworkDelay(cluster, service);
     } else if (choice == "10") {
       runFoundationDemos();
     } else if (choice == "0") {

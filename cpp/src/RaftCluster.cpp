@@ -89,6 +89,10 @@ void RaftCluster::runTick()
 {
     currentTime_++;
 
+    // Delayed messages whose arrival tick has come enter the mailboxes
+    // (nothing to do when the network has no delay set).
+    network_.advanceTo(currentTime_);
+
     // First: deliver all pending messages to engines
     deliverMessages();
 
@@ -132,13 +136,21 @@ int RaftCluster::getCurrentTime() const
 
 int RaftCluster::findLeader() const
 {
+    // With delayed messages, a running node can still believe it is the
+    // leader of an older term after a newer leader was elected (it has
+    // not heard of the new term yet).  Raft allows this; the leader of
+    // the highest term is the real one.
+    int best = -1;
+    int bestTerm = -1;
     for (int i = 0; i < clusterSize_; i++) {
         if (nodes_[i]->isActive() &&
-            engines_[i]->getRole() == RaftRole::LEADER) {
-            return nodes_[i]->getId();
+            engines_[i]->getRole() == RaftRole::LEADER &&
+            engines_[i]->getCurrentTerm() > bestTerm) {
+            best = nodes_[i]->getId();
+            bestTerm = engines_[i]->getCurrentTerm();
         }
     }
-    return -1;
+    return best;
 }
 
 RaftEngine* RaftCluster::getEngine(int nodeId)
